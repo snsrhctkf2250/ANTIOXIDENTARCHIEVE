@@ -38,9 +38,12 @@
       <td><span class="rgb-swatch" style="background:${rgbCSS(s.rgb)}" title="${getRGB(s.rgb)}"></span></td>
       <td><button class="detail-btn" data-material="${s.id}">시료 보기 ↗</button></td></tr>`).join('');
     $('dataCount').textContent = `총 ${rows.length}개 측정값 표시 · 제공된 최종 데이터 12개 중 필터 결과`;
-    $('rgbTableBody').querySelectorAll('[data-material]').forEach(b => b.addEventListener('click', () => {
+    // Event delegation keeps the sample-detail action reliable after filters redraw the table.
+    $('rgbTableBody').querySelectorAll('[data-material]').forEach(b => b.addEventListener('click', e => {
+      e.preventDefault();
       showSample(b.dataset.material);
-      location.hash = 'samples';
+      history.replaceState(null, '', '#samples');
+      $('samples').scrollIntoView({behavior:'smooth', block:'start'});
     }));
   }
   ['sampleFilter','amountFilter','dataSearch'].forEach(id => $(id).addEventListener(id === 'dataSearch' ? 'input' : 'change', renderTable));
@@ -124,18 +127,68 @@
     result.innerHTML=`상대 변화율: <strong>${fmt(val)}</strong><small>((${sample} − ${control}) ÷ ${control}) × 100</small><small>${val>0?'시료 G값이 대조군보다 높습니다.':val<0?'시료 G값이 대조군보다 낮습니다.':'시료 G값과 대조군 G값이 같습니다.'} 실제 DPPH 소거율을 뜻하지는 않습니다.</small>`;
   });
 
-  // Research record form; export entered rows as CSV (no false persistence claims).
+  // Research records: same-name samples with 3+ valid measurements and 2+ amounts get an automatic graph.
   const records = [];
+  const recordColors = ['#7655b7','#4f986e','#d58b4c','#c56b91','#4d8da8','#8a7a55'];
+  function drawRecordChart() {
+    const grouped = new Map();
+    records.forEach(record => {
+      if (!record.isValid) return;
+      const key = record.sampleName.trim().toLocaleLowerCase();
+      if (!grouped.has(key)) grouped.set(key, {name:record.sampleName.trim(), points:[]});
+      grouped.get(key).points.push({x:Number(record.amount), y:Number(record.relativeChange)});
+    });
+    const series = [...grouped.values()].map(s => {
+      const byAmount = new Map();
+      s.points.forEach(p => {
+        if (!byAmount.has(p.x)) byAmount.set(p.x, []);
+        byAmount.get(p.x).push(p.y);
+      });
+      const points = [...byAmount.entries()].map(([x, ys]) => ({x, y:ys.reduce((a,b)=>a+b,0)/ys.length, repeats:ys.length})).sort((a,b)=>a.x-b.x);
+      return {name:s.name, count:s.points.length, points};
+    }).filter(s=>s.count>=3 && s.points.length>=2);
+    const panel=$('recordChartPanel'), svg=$('recordChart'), legend=$('recordChartLegend');
+    if (!series.length) { panel.hidden=true; return; }
+    panel.hidden=false;
+    const all=series.flatMap(s=>s.points), minX=Math.min(...all.map(p=>p.x)), maxX=Math.max(...all.map(p=>p.x));
+    let minY=Math.min(0,...all.map(p=>p.y)), maxY=Math.max(0,...all.map(p=>p.y));
+    if (minY===maxY) { minY-=1; maxY+=1; }
+    const yPad=(maxY-minY)*.12; minY-=yPad; maxY+=yPad;
+    const W=820,H=430,m={l:78,r:28,t:34,b:66},pw=W-m.l-m.r,ph=H-m.t-m.b;
+    const x=p=>m.l+(maxX===minX?.5:(p-minX)/(maxX-minX))*pw;
+    const y=v=>m.t+(maxY-v)/(maxY-minY)*ph;
+    let out='';
+    for(let i=0;i<=4;i++){const v=minY+(maxY-minY)*i/4, yy=y(v), isZero=Math.abs(v)<(maxY-minY)/1000;const dash=isZero?'':'stroke-dasharray="3 5"';out+=`<line x1="${m.l}" y1="${yy}" x2="${W-m.r}" y2="${yy}" stroke="${isZero?'#8a79a5':'#eee8f3'}" stroke-width="${isZero?2:1}" ${dash}/><text x="${m.l-12}" y="${yy+4}" text-anchor="end" font-size="12" fill="#777184">${v.toFixed(1)}%</text>`;}
+    const xTicks=[...new Set(all.map(p=>p.x))].sort((a,b)=>a-b);
+    xTicks.forEach(v=>{const xx=x(v);out+=`<line x1="${xx}" y1="${m.t}" x2="${xx}" y2="${H-m.b}" stroke="#f1edf4"/><text x="${xx}" y="${H-m.b+23}" text-anchor="middle" font-size="12" fill="#777184">${v} g</text>`;});
+    out+=`<line x1="${m.l}" y1="${m.t}" x2="${m.l}" y2="${H-m.b}" stroke="#b9afc5"/><line x1="${m.l}" y1="${H-m.b}" x2="${W-m.r}" y2="${H-m.b}" stroke="#b9afc5"/>`;
+    out+=`<text x="${m.l+pw/2}" y="${H-14}" text-anchor="middle" font-size="13" font-weight="700" fill="#625a70">시료량 (g)</text><text transform="translate(20 ${H/2}) rotate(-90)" text-anchor="middle" font-size="13" font-weight="700" fill="#625a70">G 채널 상대 변화율 (%)</text>`;
+    series.forEach((s,i)=>{const color=recordColors[i%recordColors.length],pts=s.points;out+=`<polyline points="${pts.map(p=>`${x(p.x)},${y(p.y)}`).join(' ')}" fill="none" stroke="${color}" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>`;pts.forEach(p=>{out+=`<circle cx="${x(p.x)}" cy="${y(p.y)}" r="5" fill="${color}" stroke="#fff" stroke-width="2"/><text x="${x(p.x)}" y="${y(p.y)-11}" text-anchor="middle" font-size="11" font-weight="700" fill="${color}">${p.y.toFixed(2)}%</text>${p.repeats>1?`<text x="${x(p.x)}" y="${y(p.y)+20}" text-anchor="middle" font-size="10" fill="#777184">평균 ${p.repeats}회</text>`:''}`;});});
+    svg.innerHTML=out;
+    legend.innerHTML=series.map((s,i)=>`<span class="legend-item"><i class="legend-line" style="background:${recordColors[i%recordColors.length]}"></i>${esc(s.name)} (${s.count}건)</span>`).join('');
+  }
   $('recordForm').addEventListener('submit', e => {
     e.preventDefault();
     const f = new FormData(e.currentTarget);
     const record = Object.fromEntries(f.entries());
-    if (record.g !== '' && record.controlG !== '' && Number(record.controlG) !== 0) record.relativeChange = calculate(Number(record.g),Number(record.controlG)).toFixed(2);
-    else record.relativeChange = '';
+    record.sampleName = record.sampleName.trim();
+    const amount = Number(record.amount), control = Number(record.controlG);
+    const rgbValid = ['r','g','b'].every(k => record[k] !== '' && Number.isInteger(Number(record[k])) && Number(record[k]) >= 0 && Number(record[k]) <= 255);
+    const valid = record.sampleName !== '' && Number.isFinite(amount) && amount > 0 && rgbValid && Number.isFinite(control) && control > 0 && record.g !== '';
+    if (!valid) {
+      $('recordPreview').hidden=false;
+      $('recordPreview').textContent='그래프용 기록 조건을 확인해 주세요. 시료명, 0보다 큰 시료량, 0~255 범위의 정수 R·G·B 값, 0보다 큰 대조군 G값이 필요합니다.';
+      return;
+    }
+    record.relativeChange = calculate(Number(record.g),control).toFixed(2);
+    record.isValid = true;
     records.push(record);
+    const sameNameCount = records.filter(r=>r.isValid && r.sampleName.trim().toLocaleLowerCase()===record.sampleName.toLocaleLowerCase()).length;
+    const distinctAmounts = new Set(records.filter(r=>r.isValid && r.sampleName.trim().toLocaleLowerCase()===record.sampleName.toLocaleLowerCase()).map(r=>Number(r.amount))).size;
     $('recordPreview').hidden = false;
-    $('recordPreview').innerHTML = `<strong>임시 기록 ${records.length}건째가 추가되었습니다.</strong><br>${esc(record.sampleName)} · ${record.amount ? esc(record.amount)+' g' : '시료량 미입력'} · RGB (${record.r||'—'}, ${record.g||'—'}, ${record.b||'—'})<br>${record.relativeChange!==''?'G 채널 상대 변화율: '+fmt(Number(record.relativeChange)):'상대 변화율 계산용 G값 또는 대조군 G값을 확인하세요.'}`;
+    $('recordPreview').innerHTML = `<strong>임시 기록 ${records.length}건째가 추가되었습니다.</strong><br>${esc(record.sampleName)} · ${esc(record.amount)} g · RGB (${record.r}, ${record.g}, ${record.b})<br>G 채널 상대 변화율: ${fmt(Number(record.relativeChange))}<br><small>동일 시료 기록 ${sameNameCount}건 · 서로 다른 시료량 ${distinctAmounts}종류. 그래프는 기록 3건 이상 및 시료량 2종류 이상일 때 표시됩니다.</small>`;
     $('downloadCsv').disabled = false;
+    drawRecordChart();
   });
   $('downloadCsv').addEventListener('click', () => {
     if (!records.length) return;
